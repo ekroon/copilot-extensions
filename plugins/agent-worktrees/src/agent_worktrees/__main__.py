@@ -1038,6 +1038,29 @@ def cmd_handoff_cutover(args: argparse.Namespace) -> int:
     new_pane = result.get("new_pane")
     # Inject the seed as the successor's first interactive turn.
     seed_result = sessions.mux_seed_pane(new_pane, seed) if new_pane else {}
+    if not seed_result.get("ok"):
+        cleanup = (
+            sessions.mux_retire_pane(new_pane)
+            if new_pane
+            else {
+                "ok": False,
+                "pane": None,
+                "gone": False,
+                "method": "not-created",
+            }
+        )
+        _json_output({
+            "ok": False,
+            "session": f"wt-{wt_id}",
+            "old_pane": old_pane,
+            "new_pane": new_pane,
+            "seed_len": len(seed),
+            "seeded": False,
+            "seed_ready": bool(seed_result.get("ready")),
+            "reason": seed_result.get("reason") or "seed-delivery-failed",
+            "successor_cleanup": cleanup,
+        })
+        return 5
 
     _json_output({
         "ok": True,
@@ -1045,7 +1068,7 @@ def cmd_handoff_cutover(args: argparse.Namespace) -> int:
         "old_pane": old_pane,
         "new_pane": new_pane,
         "seed_len": len(seed),
-        "seeded": bool(seed_result.get("sent")),
+        "seeded": bool(seed_result.get("submitted")),
         "seed_ready": bool(seed_result.get("ready")),
     })
     return 0
