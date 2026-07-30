@@ -1650,7 +1650,7 @@ def mux_seed_pane_and_confirm(
         pane_id,
         seed,
         mux=mux,
-        ready_timeout=min(6.0, timeout),
+        ready_timeout=min(10.0, timeout),
         poll_interval=poll_interval,
         settle=0.2,
     )
