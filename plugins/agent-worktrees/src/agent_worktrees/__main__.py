@@ -950,13 +950,13 @@ def cmd_handoff_cutover(args: argparse.Namespace) -> int:
     * **spawn** (default; needs ``--seed``): reconstruct this worktree's launch
       command (the same ``_build_launch_cmd`` the picker uses) for a **plain
       interactive** Copilot, open + select a NEW window in the worktree's
-      ``wt-<id>`` mux session (cutting the operator over), then inject ``--seed``
-      as the successor's first interactive turn via ``send-keys`` once Copilot is
-      ready. The seed is typed, not passed as a launch arg -- psmux (Windows)
-      cannot carry a spaces-containing pane arg. Deliberately omits ``--resume``:
-      a handoff wants a FRESH context window seeded by the prompt, not the old
-      transcript replayed. Returns the OLD (pre-cutover) pane id so the caller can
-      retire it once the old session
+      ``wt-<id>`` mux session (cutting the operator over). tmux launches Copilot
+      with ``-i <seed>`` so delivery does not depend on terminal decoration;
+      psmux (Windows) retains the guarded ``send-keys`` fallback because it
+      cannot carry a spaces-containing pane argument. Deliberately omits
+      ``--resume``: a handoff wants a FRESH context window seeded by the prompt,
+      not the old transcript replayed. Returns the OLD (pre-cutover) pane id so
+      the caller can retire it once the old session
       reaches agent-stop.
     * **retire** (``--retire-pane <id>``): double-Ctrl-C that specific pane
       (Copilot's native clean quit), hard-killing it only if it will not exit.
@@ -1004,14 +1004,14 @@ def cmd_handoff_cutover(args: argparse.Namespace) -> int:
 
     launch_cmd = _build_launch_cmd(config, args, record.worktree_path)
     env = _build_env(None, _repo_session_env(config, record.worktree_path))
-    # The seed is NOT passed as a launch arg. The launch wraps Copilot in
-    # ``pwsh -File default-setup.ps1 ... <copilot args>`` and psmux (Windows)
+    # tmux preserves argv boundaries, so pass the seed directly as Copilot's
+    # initial prompt and avoid parsing terminal decoration. psmux (Windows)
     # cannot carry a spaces-containing pane arg (it word-splits, and a bare
-    # ``-i`` also collides with PowerShell's ``-Information*`` params). So we
-    # spawn a PLAIN interactive Copilot (no ``--resume`` either: a handoff wants
-    # a FRESH context) and inject the seed as literal keystrokes once it is
-    # ready (:func:`sessions.mux_seed_pane`) -- the same send-keys mechanism the
-    # retire path uses, immune to every command-line quoting hazard.
+    # ``-i`` also collides with PowerShell's ``-Information*`` params), so it
+    # retains the guarded send-keys fallback.
+    direct_seed = sessions._mux_bin() != "psmux"
+    if direct_seed:
+        launch_cmd = [*launch_cmd, "-i", seed]
 
     # Capture the pane to retire (the operator's current Copilot) BEFORE opening
     # the new window, which becomes the active pane. ``--old-pane`` lets the
@@ -1023,6 +1023,7 @@ def cmd_handoff_cutover(args: argparse.Namespace) -> int:
             "ok": True, "dry_run": True, "session": f"wt-{wt_id}",
             "old_pane": old_pane, "work_dir": record.worktree_path,
             "cmd": list(launch_cmd), "seed_len": len(seed),
+            "seed_delivery": "launch-arg" if direct_seed else "send-keys",
         })
         return 0
 
@@ -1036,8 +1037,18 @@ def cmd_handoff_cutover(args: argparse.Namespace) -> int:
         )
 
     new_pane = result.get("new_pane")
-    # Inject the seed as the successor's first interactive turn.
-    seed_result = sessions.mux_seed_pane(new_pane, seed) if new_pane else {}
+    if direct_seed:
+        delivered = bool(new_pane)
+        seed_result = {
+            "ok": delivered,
+            "pane": new_pane,
+            "ready": delivered,
+            "sent": delivered,
+            "submitted": delivered,
+            "reason": "launch-arg" if delivered else "missing-successor-pane",
+        }
+    else:
+        seed_result = sessions.mux_seed_pane(new_pane, seed) if new_pane else {}
     if not seed_result.get("ok"):
         cleanup = (
             sessions.mux_retire_pane(new_pane)

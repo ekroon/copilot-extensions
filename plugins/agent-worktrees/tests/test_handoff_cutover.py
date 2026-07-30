@@ -191,6 +191,7 @@ class TestCmdHandoffCutover:
     ):
         monkeypatch.setattr(m, "_infer_worktree_id_from_cwd", lambda: "wtY")
         monkeypatch.setattr(sessions, "has_mux_session", lambda w: True)
+        monkeypatch.setattr(sessions, "_mux_bin", lambda mux=None: "tmux")
         monkeypatch.setattr(sessions, "mux_active_pane", lambda w: "%1")
 
         # Fake config + record + launch cmd
@@ -224,13 +225,17 @@ class TestCmdHandoffCutover:
         assert out["dry_run"] is True
         assert out["old_pane"] == "%1"
         assert out["session"] == "wt-wtY"
-        # The seed is NOT a launch arg -- the plain launch cmd is reported as-is.
-        assert out["cmd"] == ["bash", "setup.sh", "--allow-all-tools"]
+        assert out["cmd"] == [
+            "bash", "setup.sh", "--allow-all-tools",
+            "-i", "continue the work",
+        ]
         assert out["seed_len"] == len("continue the work")
+        assert out["seed_delivery"] == "launch-arg"
 
     def test_spawn_success_opens_window(self, monkeypatch, capfd, tmp_path):
         monkeypatch.setattr(m, "_infer_worktree_id_from_cwd", lambda: "wtZ")
         monkeypatch.setattr(sessions, "has_mux_session", lambda w: True)
+        monkeypatch.setattr(sessions, "_mux_bin", lambda mux=None: "tmux")
         monkeypatch.setattr(sessions, "mux_active_pane", lambda w: "%2")
         (tmp_path / "wtZ.yaml").write_text("x")
         monkeypatch.setattr(m.cfg, "load_config", lambda: object())
@@ -252,18 +257,9 @@ class TestCmdHandoffCutover:
             return {"ok": True, "new_pane": "%5", "error": None}
 
         monkeypatch.setattr(sessions, "mux_new_window", _fake_new_window)
-        # The seed is injected via send-keys, not a launch arg -- capture it.
-        seeded = {}
         monkeypatch.setattr(
             sessions, "mux_seed_pane",
-            lambda pane, seed, **k: seeded.update(pane=pane, seed=seed)
-            or {
-                "ok": True,
-                "pane": pane,
-                "ready": True,
-                "sent": True,
-                "submitted": True,
-            },
+            lambda *a, **k: pytest.fail("tmux seed must be a launch argument"),
         )
 
         rc = m.cmd_handoff_cutover(_ns(seed="resume the multi word work", old_pane="%2"))
@@ -274,16 +270,16 @@ class TestCmdHandoffCutover:
         assert out["new_pane"] == "%5"
         assert out["seed_len"] == len("resume the multi word work")
         assert out["seeded"] is True
-        # The launch cmd carries NO seed arg; the seed is send-keys'd to the pane.
-        assert captured["cmd"] == ["copilot"]
-        assert seeded["pane"] == "%5"
-        assert seeded["seed"] == "resume the multi word work"
+        assert captured["cmd"] == [
+            "copilot", "-i", "resume the multi word work",
+        ]
 
     def test_spawn_seed_failure_closes_successor_and_reports_failure(
         self, monkeypatch, capfd, tmp_path,
     ):
         monkeypatch.setattr(m, "_infer_worktree_id_from_cwd", lambda: "wtZ")
         monkeypatch.setattr(sessions, "has_mux_session", lambda w: True)
+        monkeypatch.setattr(sessions, "_mux_bin", lambda mux=None: "psmux")
         monkeypatch.setattr(sessions, "mux_active_pane", lambda w: "%2")
         (tmp_path / "wtZ.yaml").write_text("x")
         monkeypatch.setattr(m.cfg, "load_config", lambda: object())
