@@ -43,6 +43,7 @@ import {
   findPendingHandoffFile,
   saveHandoffFile,
 } from "./handoff-files.mjs";
+import { isContextHandoffEnabled } from "./activation.mjs";
 
 // --- Configuration ---
 // Context utilization thresholds (0.0-1.0)
@@ -500,7 +501,8 @@ const joinPendingTimer = setTimeout(() => {
 }, 5000);
 joinPendingTimer.unref();
 
-const session = await joinSession({
+const contextHandoffEnabled = isContextHandoffEnabled();
+const session = await joinSession(contextHandoffEnabled ? {
   tools: [
     {
       name: "generate_handoff_prompt",
@@ -963,7 +965,7 @@ const session = await joinSession({
       },
     },
   ],
-});
+} : {});
 clearTimeout(joinPendingTimer);
 process.stderr.write(
   `[context-handoff-ext] joined session in ${Date.now() - joinStartedAt}ms ` +
@@ -985,6 +987,7 @@ process.stderr.write(
 // re-painted indefinitely by the CLI's notification renderer (dotfiles#447),
 // flooding the UI. The extension's launch is already recorded per-fork in its
 // own extension launch log, so nothing is lost by staying silent in the UI.
+if (contextHandoffEnabled) {
 state.sessionId = session.sessionId ?? state.sessionId ?? null;
 state.cwd = state.cwd || process.cwd();
 state.turnCount = 0;
@@ -1200,3 +1203,4 @@ session.on("session.compaction_complete", (event) => {
     );
   }
 });
+}

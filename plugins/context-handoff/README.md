@@ -45,8 +45,8 @@ the **next** Copilot CLI session (extensions are scanned at startup).
 
 ## Requirements
 
-Two conditions must hold for the extension to load -- both are handled outside
-this plugin:
+Three conditions must hold for the extension to activate -- all are handled
+outside this plugin:
 
 1. **The plugin must be enabled.** `context-handoff@copilot-extensions: true`
    in `enabledPlugins` (user `~/.copilot/settings.json`, or a repo's
@@ -57,13 +57,18 @@ this plugin:
    installer (`Ensure-CopilotExperimental`, run on `agent-worktrees
    install`/`update`), the session-lifecycle owner present on every machine.
    This plugin does not set it.
+3. **`COPILOT_CONTEXT_HANDOFF=1`** in the environment that launches Copilot.
+   Control-harness binstubs should set this only for sessions where automatic
+   context monitoring and handoff tools are wanted. Without it, the extension
+   joins the session without registering tools or event listeners.
 
 ## Verify
 
-A loaded extension logs `[Context Handoff] Session started ...` and exposes the
+A loaded and activated extension exposes the
 `generate_handoff_prompt` / `save_handoff_prompt` tools. `/extensions` lists it
-with source **plugin**. If it does not load, confirm both requirements above and
-start a fresh session (the context-handoff-setup skill walks through this).
+with source **plugin**. If it does not activate, confirm all three requirements
+above and start a fresh session (the context-handoff-setup skill walks through
+this).
 
 ## Thresholds
 

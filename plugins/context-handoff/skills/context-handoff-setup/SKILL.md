@@ -3,10 +3,10 @@ name: context-handoff-setup
 description: >
   Troubleshoot the context-handoff Copilot CLI extension when it is missing or
   not loading. The extension is contributed directly by the context-handoff
-  plugin (no install step) -- this skill verifies the two conditions that gate
-  it: the plugin is enabled, and experimental mode is on. Use when the
-  context-handoff extension is not loading or its tools are absent. Trigger
-  phrases include:
+  plugin (no install step) -- this skill verifies the three conditions that
+  gate it: the plugin is enabled, experimental mode is on, and the launching
+  harness opted in. Use when the context-handoff extension is not loading or
+  its tools are absent. Trigger phrases include:
   - 'context-handoff not loading'
   - 'context-handoff extension missing'
   - 'handoff extension not working'
@@ -34,9 +34,9 @@ at session startup and loads `context-handoff/extension.mjs` as a `plugin`-sourc
 extension. No copy to `~/.copilot/extensions/`, no `scripts/install.*`, no
 manifest.
 
-## Two conditions gate it
+## Three conditions gate it
 
-Both must hold. Check them in order, then start a fresh session.
+All must hold. Check them in order, then start a fresh session.
 
 ### 1. The plugin must be enabled
 
@@ -70,11 +70,25 @@ agent-worktrees update
 
 and confirm `"experimental": true` is present in `~/.copilot/settings.json`.
 
+### 3. The launching harness must opt in
+
+The extension registers its tools and event listeners only when Copilot starts
+with `COPILOT_CONTEXT_HANDOFF=1`. A control-harness setup script should export
+that variable immediately before it executes `copilot`:
+
+```bash
+export COPILOT_CONTEXT_HANDOFF=1
+exec copilot "$@"
+```
+
+Starting `copilot` directly without that variable intentionally leaves the
+extension inert.
+
 ## Verify
 
-Start a fresh Copilot CLI session. A loaded extension logs
-`[Context Handoff] Session started ...` and exposes `generate_handoff_prompt` /
-`save_handoff_prompt`. `/extensions` lists `context-handoff` with source
-**plugin** (exactly once -- if you see it twice, a stale copy exists under
-`~/.copilot/extensions/context-handoff/` or a project `.github/extensions/`; the
-CLI loads every source with no dedup, so remove the redundant copy).
+Start a fresh Copilot CLI session through the opted-in harness and confirm it
+exposes `generate_handoff_prompt` / `save_handoff_prompt`. `/extensions` lists
+`context-handoff` with source **plugin** (exactly once -- if you see it twice, a
+stale copy exists under `~/.copilot/extensions/context-handoff/` or a project
+`.github/extensions/`; the CLI loads every source with no dedup, so remove the
+redundant copy).
