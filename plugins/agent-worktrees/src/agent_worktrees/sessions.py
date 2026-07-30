@@ -1597,6 +1597,99 @@ def mux_seed_pane(
     }
 
 
+def copilot_session_ids_for_cwd(work_dir: str) -> set[str]:
+    """Return Copilot session ids whose workspace metadata matches ``work_dir``."""
+    root = Path.home() / ".copilot" / "session-state"
+    wanted = os.path.normcase(os.path.realpath(work_dir))
+    found: set[str] = set()
+    if not root.is_dir():
+        return found
+    for workspace in root.glob("*/workspace.yaml"):
+        try:
+            data = yaml.safe_load(workspace.read_text(encoding="utf-8")) or {}
+            cwd = data.get("cwd")
+            if cwd and os.path.normcase(os.path.realpath(str(cwd))) == wanted:
+                found.add(workspace.parent.name)
+        except (OSError, yaml.YAMLError):
+            continue
+    return found
+
+
+def mux_confirm_prefilled_seed(
+    pane_id: str,
+    seed: str,
+    work_dir: str,
+    prior_sessions: set[str],
+    *,
+    mux: str | None = None,
+    timeout: float = 12.0,
+    poll_interval: float = 0.25,
+) -> dict:
+    """Submit a ``copilot -i`` prompt and prove the fresh session accepted it."""
+    import re
+    import subprocess
+    import time
+
+    mux_bin = _mux_bin(mux)
+    state_root = Path.home() / ".copilot" / "session-state"
+
+    def _capture() -> str:
+        try:
+            result = subprocess.run(
+                [mux_bin, "capture-pane", "-p", "-t", pane_id],
+                capture_output=True, text=True, timeout=5,
+            )
+            return result.stdout if result.returncode == 0 else ""
+        except (OSError, subprocess.TimeoutExpired):
+            return ""
+
+    def _accepted_session() -> str | None:
+        candidates = copilot_session_ids_for_cwd(work_dir) - prior_sessions
+        for session_id in candidates:
+            events = state_root / session_id / "events.jsonl"
+            try:
+                for line in events.read_text(encoding="utf-8").splitlines():
+                    event = json.loads(line)
+                    if event.get("type") == "user.message" and (
+                        event.get("data", {}).get("content") == seed
+                    ):
+                        return session_id
+            except (OSError, json.JSONDecodeError):
+                continue
+        return None
+
+    def _squash(value: str) -> str:
+        return re.sub(r"\s+", "", value)
+
+    head = _squash(seed)[:24]
+    deadline = time.monotonic() + timeout
+    enter_sent = False
+    while time.monotonic() < deadline:
+        session_id = _accepted_session()
+        if session_id:
+            return {
+                "ok": True, "pane": pane_id, "ready": True,
+                "sent": True, "submitted": True,
+                "reason": "accepted-turn", "session_id": session_id,
+            }
+        if not enter_sent and head and head in _squash(_capture()):
+            try:
+                result = subprocess.run(
+                    [mux_bin, "send-keys", "-t", pane_id, "Enter"],
+                    capture_output=True, timeout=5,
+                )
+                enter_sent = result.returncode == 0
+            except (OSError, subprocess.TimeoutExpired):
+                enter_sent = False
+        time.sleep(poll_interval)
+
+    return {
+        "ok": False, "pane": pane_id, "ready": enter_sent,
+        "sent": enter_sent, "submitted": False,
+        "reason": "acceptance-timeout",
+    }
+
+
 def mux_active_pane(worktree_id: str, *, mux: str | None = None) -> str | None:
     """Return the active pane id (e.g. ``%3``) of ``wt-<id>``'s current window.
 

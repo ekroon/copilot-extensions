@@ -261,6 +261,28 @@ class TestCmdHandoffCutover:
             sessions, "mux_seed_pane",
             lambda *a, **k: pytest.fail("tmux seed must be a launch argument"),
         )
+        confirmed = {}
+        monkeypatch.setattr(
+            sessions, "mux_confirm_prefilled_seed",
+            lambda pane, seed, work_dir, prior_sessions, **k: confirmed.update(
+                pane=pane,
+                seed=seed,
+                work_dir=work_dir,
+                prior_sessions=prior_sessions,
+            ) or {
+                "ok": True,
+                "pane": pane,
+                "ready": True,
+                "sent": True,
+                "submitted": True,
+                "reason": "accepted-turn",
+                "session_id": "new-session",
+            },
+        )
+        monkeypatch.setattr(
+            sessions, "copilot_session_ids_for_cwd",
+            lambda work_dir: {"old-session"},
+        )
 
         rc = m.cmd_handoff_cutover(_ns(seed="resume the multi word work", old_pane="%2"))
         assert rc == 0
@@ -273,6 +295,67 @@ class TestCmdHandoffCutover:
         assert captured["cmd"] == [
             "copilot", "-i", "resume the multi word work",
         ]
+        assert confirmed == {
+            "pane": "%5",
+            "seed": "resume the multi word work",
+            "work_dir": str(tmp_path / "w"),
+            "prior_sessions": {"old-session"},
+        }
+
+    def test_spawn_direct_seed_not_accepted_closes_successor(
+        self, monkeypatch, capfd, tmp_path,
+    ):
+        monkeypatch.setattr(m, "_infer_worktree_id_from_cwd", lambda: "wtZ")
+        monkeypatch.setattr(sessions, "has_mux_session", lambda w: True)
+        monkeypatch.setattr(sessions, "_mux_bin", lambda mux=None: "tmux")
+        monkeypatch.setattr(sessions, "mux_active_pane", lambda w: "%2")
+        monkeypatch.setattr(
+            sessions, "copilot_session_ids_for_cwd",
+            lambda work_dir: {"old-session"},
+        )
+        (tmp_path / "wtZ.yaml").write_text("x")
+        monkeypatch.setattr(m.cfg, "load_config", lambda: object())
+        monkeypatch.setattr(m.cfg, "tracking_dir", lambda: tmp_path)
+
+        class _Rec:
+            worktree_path = str(tmp_path / "w")
+
+        monkeypatch.setattr(m.tracking, "load_record", lambda p: _Rec())
+        monkeypatch.setattr(m, "_build_launch_cmd",
+                            lambda c, a, wd: ["copilot"])
+        monkeypatch.setattr(m, "_build_env", lambda p, s: {})
+        monkeypatch.setattr(m, "_repo_session_env", lambda c, w: {})
+        monkeypatch.setattr(
+            sessions, "mux_new_window",
+            lambda *a, **k: {"ok": True, "new_pane": "%5", "error": None},
+        )
+        monkeypatch.setattr(
+            sessions, "mux_confirm_prefilled_seed",
+            lambda *a, **k: {
+                "ok": False,
+                "pane": "%5",
+                "ready": True,
+                "sent": True,
+                "submitted": False,
+                "reason": "acceptance-timeout",
+            },
+        )
+        retired = []
+        monkeypatch.setattr(
+            sessions, "mux_retire_pane",
+            lambda pane, **k: retired.append(pane) or {
+                "ok": True, "pane": pane, "gone": True, "method": "graceful",
+            },
+        )
+
+        rc = m.cmd_handoff_cutover(_ns(seed="resume work", old_pane="%2"))
+
+        assert rc == 5
+        out = json.loads(capfd.readouterr().out)
+        assert out["ok"] is False
+        assert out["reason"] == "acceptance-timeout"
+        assert out["successor_cleanup"]["ok"] is True
+        assert retired == ["%5"]
 
     def test_spawn_seed_failure_closes_successor_and_reports_failure(
         self, monkeypatch, capfd, tmp_path,

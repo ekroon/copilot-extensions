@@ -1010,6 +1010,11 @@ def cmd_handoff_cutover(args: argparse.Namespace) -> int:
     # ``-i`` also collides with PowerShell's ``-Information*`` params), so it
     # retains the guarded send-keys fallback.
     direct_seed = sessions._mux_bin() != "psmux"
+    prior_sessions = (
+        sessions.copilot_session_ids_for_cwd(record.worktree_path)
+        if direct_seed
+        else set()
+    )
     if direct_seed:
         launch_cmd = [*launch_cmd, "-i", seed]
 
@@ -1038,15 +1043,20 @@ def cmd_handoff_cutover(args: argparse.Namespace) -> int:
 
     new_pane = result.get("new_pane")
     if direct_seed:
-        delivered = bool(new_pane)
-        seed_result = {
-            "ok": delivered,
-            "pane": new_pane,
-            "ready": delivered,
-            "sent": delivered,
-            "submitted": delivered,
-            "reason": "launch-arg" if delivered else "missing-successor-pane",
-        }
+        seed_result = (
+            sessions.mux_confirm_prefilled_seed(
+                new_pane, seed, record.worktree_path, prior_sessions,
+            )
+            if new_pane
+            else {
+                "ok": False,
+                "pane": None,
+                "ready": False,
+                "sent": False,
+                "submitted": False,
+                "reason": "missing-successor-pane",
+            }
+        )
     else:
         seed_result = sessions.mux_seed_pane(new_pane, seed) if new_pane else {}
     if not seed_result.get("ok"):
