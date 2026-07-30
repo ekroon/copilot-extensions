@@ -28,18 +28,21 @@
 
 import {
   existsSync,
-  mkdirSync,
   writeFileSync,
   unlinkSync,
   readFileSync,
-  readdirSync,
-  statSync,
 } from "node:fs";
 import { execSync, execFileSync } from "node:child_process";
 import { join, basename } from "node:path";
 import { homedir, tmpdir } from "node:os";
-import { approveAll } from "@github/copilot-sdk";
 import { joinSession } from "@github/copilot-sdk/extension";
+import {
+  abortHandoffFileConsumption,
+  beginHandoffFileConsumption,
+  completeHandoffFileConsumption,
+  findPendingHandoffFile,
+  saveHandoffFile,
+} from "./handoff-files.mjs";
 
 // --- Configuration ---
 // Context utilization thresholds (0.0-1.0)
@@ -143,15 +146,21 @@ function collectHandoffData(sid, overrides = {}) {
   };
 }
 
-// Persist a handoff prompt file in the current session's state folder.
-function saveHandoffPrompt(promptText, sid) {
-  const stateDir = join(homedir(), ".copilot", "session-state", sid, "files");
-  if (!existsSync(stateDir)) {
-    mkdirSync(stateDir, { recursive: true });
-  }
-  const promptPath = join(stateDir, `${sid}-prompt.md`);
-  writeFileSync(promptPath, promptText, "utf-8");
-  return promptPath;
+function handoffRoot() {
+  return join(homedir(), ".copilot", "session-state");
+}
+
+// Persist the prompt plus explicit worktree metadata. Selection never scrapes
+// identity from the prose handoff itself.
+function saveHandoffPrompt(promptText, sid, cwd) {
+  const worktreeDir = agentWorktreesGet("worktree-dir", cwd);
+  return saveHandoffFile({
+    root: handoffRoot(),
+    sessionId: sid,
+    promptText,
+    cwd,
+    worktreeDir,
+  }).promptPath;
 }
 
 // --- agent-dispatch integration (soft dependency) ---
@@ -373,39 +382,14 @@ function consumeHandoffTask(cwd, task, sid) {
   return { id, owner, payload: payload.trim(), prompt: task.prompt || "" };
 }
 
-// Fallback (no coordinator): find the newest session-folder handoff file whose
-// recorded CWD matches the current one. Returns { path, text } or null.
+// Fallback (no coordinator): find the newest pending file whose metadata names
+// this exact worktree. Legacy prose-only handoffs are deliberately ineligible.
 function findHandoffFile(cwd) {
-  const root = join(homedir(), ".copilot", "session-state");
-  if (!existsSync(root)) return null;
-  let best = null;
-  let bestMtime = 0;
-  let sessions;
-  try {
-    sessions = readdirSync(root);
-  } catch {
-    return null;
-  }
-  for (const sid of sessions) {
-    const path = join(root, sid, "files", `${sid}-prompt.md`);
-    if (!existsSync(path)) continue;
-    let text;
-    let mtime;
-    try {
-      text = readFileSync(path, "utf-8");
-      mtime = statSync(path).mtimeMs;
-    } catch {
-      continue;
-    }
-    // Prefer files whose recorded "**CWD:** <path>" matches this worktree.
-    const cwdMatch = text.includes(`**CWD:** ${cwd}`) || text.includes(cwd);
-    const score = mtime + (cwdMatch ? 1e15 : 0); // CWD match dominates recency
-    if (score > bestMtime) {
-      bestMtime = score;
-      best = { path, text };
-    }
-  }
-  return best;
+  return findPendingHandoffFile({
+    root: handoffRoot(),
+    cwd,
+    worktreeDir: agentWorktreesGet("worktree-dir", cwd),
+  });
 }
 
 // Compose the prompt injected into the current session on resume.
@@ -503,9 +487,20 @@ function formatHandoffMarkdown(handoffData, scope) {
 
 // --- Extension ---
 
-const session = await joinSession({
-  onPermissionRequest: approveAll,
+const joinStartedAt = Date.now();
+process.stderr.write(
+  `[context-handoff-ext] joining session pid=${process.pid} ` +
+    `session=${process.env.COPILOT_SESSION_ID || process.env.SESSION_ID || "unknown"}\n`,
+);
+const joinPendingTimer = setTimeout(() => {
+  process.stderr.write(
+    `[context-handoff-ext] joinSession still pending after ` +
+      `${Date.now() - joinStartedAt}ms\n`,
+  );
+}, 5000);
+joinPendingTimer.unref();
 
+const session = await joinSession({
   tools: [
     {
       name: "generate_handoff_prompt",
@@ -576,7 +571,7 @@ const session = await joinSession({
             "3. Reply with ONLY that short prompt (the tool tells you which form):",
             "   either the agent-dispatch resume seed ('You are resuming a handoff",
             "   (agent-dispatch task <id>) … run: agent-dispatch consume <id>')",
-            "   or 'Read the handoff at <path> and continue: …'. The user pastes",
+            "   or the exact-path consume_handoff_file seed. The user pastes",
             "   it into '/clear' (or '/new'); the dispatch form is also resumable",
             "   via /resume-handoff.",
             "Do NOT paste the handoff contents, commit anything, or claim the",
@@ -710,17 +705,19 @@ const session = await joinSession({
         }
 
         if (!seed) {
-          const promptPath = saveHandoffPrompt(text, sid);
-          seed = `${lead}. Read the handoff at ${promptPath} and continue.`;
+          const promptPath = saveHandoffPrompt(text, sid, cwd);
+          seed =
+            `${lead}. Load and consume the exact file-backed handoff with the ` +
+            `consume_handoff_file tool using path: ${promptPath} .`;
           cutoverSeed = seed;  // no task in file mode: cutover reuses the paste seed
           storedMsg = (
             `Handoff saved to ${promptPath}\n\n` +
             `(Stored as a session file — no reachable agent-dispatch coordinator, ` +
             `or the worktree couldn't be resolved.) Reply to the user with ONLY a ` +
             `short wrapper prompt they copy verbatim into '/clear' (or '/new'). ` +
-            `The wrapper is addressed to the NEXT session's agent and must (1) name ` +
-            `this absolute path (a ~/ form is fine) and (2) instruct that agent to ` +
-            `READ the handoff file and continue. For example:\n` +
+            `The wrapper is addressed to the NEXT session's agent and must name ` +
+            `this absolute path and instruct that agent to call ` +
+            `consume_handoff_file. For example:\n` +
             `  ${seed}\n` +
             `Do NOT paste the file's contents, and do NOT claim it loads ` +
             `automatically on restart -- it does not.`
@@ -738,6 +735,58 @@ const session = await joinSession({
           `set to exactly the HANDOFF_SEED string above. Only fall back to the ` +
           `short paste prompt if continue_handoff reports no mux session.)`
         );
+      },
+    },
+    {
+      name: "consume_handoff_file",
+      description:
+        "Load one exact file-backed handoff for the current worktree and mark " +
+        "it consumed once its contents have been loaded. Pass the absolute " +
+        "prompt path returned by save_handoff_prompt. Handoffs from another " +
+        "worktree and already-consumed handoffs are rejected; failed loads " +
+        "remain recoverable.",
+      skipPermission: true,
+      parameters: {
+        type: "object",
+        properties: {
+          path: {
+            type: "string",
+            description:
+              "Absolute path to the exact session-state *-prompt.md handoff file.",
+          },
+        },
+        required: ["path"],
+      },
+      handler: async (args, invocation) => {
+        ensureState(invocation);
+        const promptPath = (args?.path ?? "").toString().trim();
+        if (!promptPath) {
+          return "Cannot consume handoff file: pass its absolute path as `path`.";
+        }
+        const cwd = state.cwd || process.cwd();
+        const sid = state.sessionId || invocation?.sessionId || "unknown";
+        let claim = null;
+        try {
+          claim = beginHandoffFileConsumption({
+            root: handoffRoot(),
+            promptPath,
+            cwd,
+            worktreeDir: agentWorktreesGet("worktree-dir", cwd),
+            consumerSessionId: sid,
+          });
+          const prompt = buildResumePrompt(claim.text, `file ${promptPath}`);
+          completeHandoffFileConsumption(claim);
+          return {
+            textResultForLlm: prompt,
+            resultType: "success",
+          };
+        } catch (error) {
+          if (claim) abortHandoffFileConsumption(claim);
+          return (
+            `Cannot consume handoff file ${promptPath}: ` +
+            `${error instanceof Error ? error.message : String(error)}`
+          );
+        }
       },
     },
     {
@@ -760,8 +809,8 @@ const session = await joinSession({
             type: "string",
             description:
               "The successor's first interactive prompt -- pass the exact " +
-              "HANDOFF_SEED string returned by save_handoff_prompt (e.g. 'Claim " +
-              "and act on the handoff <id> …' or 'Read the handoff at <path> …').",
+              "HANDOFF_SEED string returned by save_handoff_prompt (e.g. an " +
+              "agent-dispatch consume command or exact-path consume_handoff_file instruction).",
           },
         },
       },
@@ -845,7 +894,8 @@ const session = await joinSession({
       description:
         "Dig up this worktree's pending handoff and inject its continuation " +
         "prompt into THIS session (foreground). Consumes the agent-dispatch " +
-        "handoff task if present, else the newest matching session file.",
+        "handoff task if present, else the newest pending file whose metadata " +
+        "matches this exact worktree.",
       handler: async (ctx) => {
         const cwd = state.cwd || process.cwd();
         const sid = state.sessionId || ctx?.sessionId || "unknown";
@@ -879,10 +929,29 @@ const session = await joinSession({
         // Fallback: the newest session-folder handoff file for this worktree.
         const file = findHandoffFile(cwd);
         if (file) {
-          await session.send({
-            prompt: buildResumePrompt(file.text, `file ${file.path}`),
-            displayPrompt: `Resuming handoff from ${basename(file.path)}`,
-          });
+          let claim = null;
+          try {
+            claim = beginHandoffFileConsumption({
+              root: handoffRoot(),
+              promptPath: file.promptPath,
+              cwd,
+              worktreeDir: agentWorktreesGet("worktree-dir", cwd),
+              consumerSessionId: sid,
+            });
+            await session.send({
+              prompt: buildResumePrompt(claim.text, `file ${file.promptPath}`),
+              displayPrompt: `Resuming handoff from ${basename(file.promptPath)}`,
+            });
+            completeHandoffFileConsumption(claim);
+          } catch (error) {
+            if (claim) abortHandoffFileConsumption(claim);
+            await session.log(
+              `Found file-backed handoff but could not load it: ` +
+                `${error instanceof Error ? error.message : String(error)}. ` +
+                `It remains pending for retry.`,
+              { level: "warning" },
+            );
+          }
           return;
         }
 
@@ -895,6 +964,11 @@ const session = await joinSession({
     },
   ],
 });
+clearTimeout(joinPendingTimer);
+process.stderr.write(
+  `[context-handoff-ext] joined session in ${Date.now() - joinStartedAt}ms ` +
+    `session=${session.sessionId || "unknown"}\n`,
+);
 
 // --- Session lifecycle reconstructed from events (SDK callback hooks removed) ---
 // The native runtime dropped SDK callback hooks ("SDK hook callbacks are no

@@ -950,13 +950,14 @@ def cmd_handoff_cutover(args: argparse.Namespace) -> int:
     * **spawn** (default; needs ``--seed``): reconstruct this worktree's launch
       command (the same ``_build_launch_cmd`` the picker uses) for a **plain
       interactive** Copilot, open + select a NEW window in the worktree's
-      ``wt-<id>`` mux session (cutting the operator over), then inject ``--seed``
-      as the successor's first interactive turn via ``send-keys`` once Copilot is
-      ready. The seed is typed, not passed as a launch arg -- psmux (Windows)
-      cannot carry a spaces-containing pane arg. Deliberately omits ``--resume``:
-      a handoff wants a FRESH context window seeded by the prompt, not the old
-      transcript replayed. Returns the OLD (pre-cutover) pane id so the caller can
-      retire it once the old session
+      ``wt-<id>`` mux session (cutting the operator over). tmux submits the
+      prompt through guarded literal input and requires the fresh session event
+      log to accept the exact turn. This bypasses ``copilot -i``, whose initial
+      prompt waits behind the CLI's aggregate extension-loading participant.
+      psmux (Windows) retains its existing guarded ``send-keys`` fallback.
+      Deliberately omits ``--resume``: a handoff wants a FRESH context window,
+      not the old transcript replayed. Returns the OLD (pre-cutover) pane id so
+      the caller can retire it once the old session
       reaches agent-stop.
     * **retire** (``--retire-pane <id>``): double-Ctrl-C that specific pane
       (Copilot's native clean quit), hard-killing it only if it will not exit.
@@ -1004,14 +1005,15 @@ def cmd_handoff_cutover(args: argparse.Namespace) -> int:
 
     launch_cmd = _build_launch_cmd(config, args, record.worktree_path)
     env = _build_env(None, _repo_session_env(config, record.worktree_path))
-    # The seed is NOT passed as a launch arg. The launch wraps Copilot in
-    # ``pwsh -File default-setup.ps1 ... <copilot args>`` and psmux (Windows)
-    # cannot carry a spaces-containing pane arg (it word-splits, and a bare
-    # ``-i`` also collides with PowerShell's ``-Information*`` params). So we
-    # spawn a PLAIN interactive Copilot (no ``--resume`` either: a handoff wants
-    # a FRESH context) and inject the seed as literal keystrokes once it is
-    # ready (:func:`sessions.mux_seed_pane`) -- the same send-keys mechanism the
-    # retire path uses, immune to every command-line quoting hazard.
+    # tmux can type into the live input surface even while the CLI's aggregate
+    # extension-loading banner is stuck. psmux retains the existing fallback;
+    # its acceptance confirmation remains a separate parity follow-up.
+    confirm_seed = sessions._mux_bin() != "psmux"
+    prior_sessions = (
+        sessions.copilot_session_ids_for_cwd(record.worktree_path)
+        if confirm_seed
+        else set()
+    )
 
     # Capture the pane to retire (the operator's current Copilot) BEFORE opening
     # the new window, which becomes the active pane. ``--old-pane`` lets the
@@ -1023,6 +1025,9 @@ def cmd_handoff_cutover(args: argparse.Namespace) -> int:
             "ok": True, "dry_run": True, "session": f"wt-{wt_id}",
             "old_pane": old_pane, "work_dir": record.worktree_path,
             "cmd": list(launch_cmd), "seed_len": len(seed),
+            "seed_delivery": (
+                "send-keys-confirmed" if confirm_seed else "send-keys"
+            ),
         })
         return 0
 
@@ -1036,8 +1041,47 @@ def cmd_handoff_cutover(args: argparse.Namespace) -> int:
         )
 
     new_pane = result.get("new_pane")
-    # Inject the seed as the successor's first interactive turn.
-    seed_result = sessions.mux_seed_pane(new_pane, seed) if new_pane else {}
+    if confirm_seed:
+        seed_result = (
+            sessions.mux_seed_pane_and_confirm(
+                new_pane, seed, record.worktree_path, prior_sessions,
+            )
+            if new_pane
+            else {
+                "ok": False,
+                "pane": None,
+                "ready": False,
+                "sent": False,
+                "submitted": False,
+                "reason": "missing-successor-pane",
+            }
+        )
+    else:
+        seed_result = sessions.mux_seed_pane(new_pane, seed) if new_pane else {}
+    if not seed_result.get("ok"):
+        cleanup = (
+            sessions.mux_retire_pane(new_pane)
+            if new_pane
+            else {
+                "ok": False,
+                "pane": None,
+                "gone": False,
+                "method": "not-created",
+            }
+        )
+        _json_output({
+            "ok": False,
+            "session": f"wt-{wt_id}",
+            "old_pane": old_pane,
+            "new_pane": new_pane,
+            "seed_len": len(seed),
+            "seeded": False,
+            "seed_ready": bool(seed_result.get("ready")),
+            "reason": seed_result.get("reason") or "seed-delivery-failed",
+            "capture_tail": seed_result.get("capture_tail"),
+            "successor_cleanup": cleanup,
+        })
+        return 5
 
     _json_output({
         "ok": True,
@@ -1045,7 +1089,7 @@ def cmd_handoff_cutover(args: argparse.Namespace) -> int:
         "old_pane": old_pane,
         "new_pane": new_pane,
         "seed_len": len(seed),
-        "seeded": bool(seed_result.get("sent")),
+        "seeded": bool(seed_result.get("submitted")),
         "seed_ready": bool(seed_result.get("ready")),
     })
     return 0

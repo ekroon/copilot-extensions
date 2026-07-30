@@ -6,7 +6,7 @@ This plugin ships two cooperating pieces:
 
 | Piece | Type | Role |
 |-------|------|------|
-| **context-handoff extension** | Copilot CLI session extension (`extension.mjs`) | Monitors `session.usage_info` for exact token counts; injects `additionalContext` nudges at 55% / 70% utilization; provides `generate_handoff_prompt` + `save_handoff_prompt` tools and the **`/resume-handoff`** slash command. `save_handoff_prompt` sits **on top of agent-dispatch**: when a coordinator is reachable it stores the handoff as a `proposed`/`handoff` **task** (payload = the markdown, pinned to the worktree, no session file); otherwise it falls back to a session-folder file. `/resume-handoff` digs up this worktree's pending handoff (task, else file) and **injects its continuation prompt into the current session** |
+| **context-handoff extension** | Copilot CLI session extension (`extension.mjs`) | Monitors `session.usage_info` for exact token counts; injects `additionalContext` nudges at 55% / 70% utilization; provides `generate_handoff_prompt`, `save_handoff_prompt`, and `consume_handoff_file` tools plus the **`/resume-handoff`** slash command. `save_handoff_prompt` sits **on top of agent-dispatch**: when a coordinator is reachable it stores the handoff as a `proposed`/`handoff` **task** (payload = the markdown, pinned to the worktree, no session file); otherwise it falls back to a session-folder file with an explicit worktree/state sidecar. `/resume-handoff` digs up this worktree's pending handoff (task, else file) and **injects its continuation prompt into the current session** |
 | **context-handoff skill** | Skill | The `/handoff` workflow -- composes the continuation prompt from the extension's structured facts and the agent's live context. (Resume is handled by the extension's `/resume-handoff` command, which injects the handoff; the skill documents both) |
 
 ## Why an extension (and not a pure plugin)
@@ -94,3 +94,16 @@ that state -- context-handoff keeps no rival pointer):
 
 Both writes are best-effort: a failure never undoes the (already successful)
 cutover.
+
+## File-backed handoff consumption
+
+When agent-dispatch is unavailable, `save_handoff_prompt` writes the prompt and
+a JSON sidecar containing the exact worktree identity and consumption state.
+Selection uses only that metadata; it never guesses from prose or global
+recency. Loading moves the sidecar atomically through `pending` → `consuming` →
+`consumed`, and a failed load returns it to `pending`. A stale interrupted
+`consuming` claim becomes retryable after five minutes.
+
+The live-cutover seed names the exact prompt path and directs the successor to
+`consume_handoff_file`. Manual `/resume-handoff` uses the same metadata and
+state transitions, so a consumed file is not selected again.

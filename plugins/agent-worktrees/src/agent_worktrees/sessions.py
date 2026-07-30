@@ -1519,17 +1519,25 @@ def mux_seed_pane(
 
     def _is_copilot_ready(cap: str) -> bool:
         low = cap.lower()
-        # Copilot-specific cues only: the input caret, or the interrupt footer.
-        # A bare rule line (``─────``) is NOT trusted -- banners/spinners draw it.
-        return ("❯" in cap) or ("esc" in low and "interrupt" in low)
+        # Copilot-specific cues only: the classic caret, the current framed
+        # input box, or the interrupt footer. A bare rule line is NOT trusted --
+        # banners/spinners draw it too.
+        framed_input = "╻" in cap and "╹" in cap and "┃" in cap
+        return (
+            ("❯" in cap)
+            or framed_input
+            or ("esc" in low and "interrupt" in low)
+        )
 
     # Readiness must be STABLE (two consecutive sightings) so a single transient
     # frame (a startup banner, a spinner) is not mistaken for the input prompt.
     ready = False
     stable = 0
+    last_capture = ""
     deadline = time.monotonic() + ready_timeout
     while time.monotonic() < deadline:
-        if _is_copilot_ready(_cap()):
+        last_capture = _cap()
+        if _is_copilot_ready(last_capture):
             stable += 1
             if stable >= 2:
                 ready = True
@@ -1545,6 +1553,7 @@ def mux_seed_pane(
         return {
             "ok": False, "pane": pane_id, "ready": False,
             "sent": False, "submitted": False, "reason": "not-ready-timeout",
+            "capture_tail": last_capture[-1000:],
         }
 
     def _send(*a: str) -> bool:
@@ -1594,6 +1603,86 @@ def mux_seed_pane(
     return {
         "ok": bool(submitted), "pane": pane_id, "ready": ready,
         "sent": bool(sent), "submitted": bool(submitted), "reason": reason,
+    }
+
+
+def copilot_session_ids_for_cwd(work_dir: str) -> set[str]:
+    """Return Copilot session ids whose workspace metadata matches ``work_dir``."""
+    root = Path.home() / ".copilot" / "session-state"
+    wanted = os.path.normcase(os.path.realpath(work_dir))
+    found: set[str] = set()
+    if not root.is_dir():
+        return found
+    for workspace in root.glob("*/workspace.yaml"):
+        try:
+            data = yaml.safe_load(workspace.read_text(encoding="utf-8")) or {}
+            cwd = data.get("cwd")
+            if cwd and os.path.normcase(os.path.realpath(str(cwd))) == wanted:
+                found.add(workspace.parent.name)
+        except (OSError, yaml.YAMLError):
+            continue
+    return found
+
+
+def mux_seed_pane_and_confirm(
+    pane_id: str,
+    seed: str,
+    work_dir: str,
+    prior_sessions: set[str],
+    *,
+    mux: str | None = None,
+    timeout: float = 12.0,
+    poll_interval: float = 0.25,
+) -> dict:
+    """Submit the exact seed through tmux and prove the fresh session accepted it."""
+    import time
+
+    state_root = Path.home() / ".copilot" / "session-state"
+
+    def _accepted_session() -> str | None:
+        candidates = copilot_session_ids_for_cwd(work_dir) - prior_sessions
+        for session_id in candidates:
+            events = state_root / session_id / "events.jsonl"
+            try:
+                for line in events.read_text(encoding="utf-8").splitlines():
+                    event = json.loads(line)
+                    if event.get("type") == "user.message" and (
+                        event.get("data", {}).get("content") == seed
+                    ):
+                        return session_id
+            except (OSError, json.JSONDecodeError):
+                continue
+        return None
+
+    started = time.monotonic()
+    seed_result = mux_seed_pane(
+        pane_id,
+        seed,
+        mux=mux,
+        ready_timeout=min(10.0, timeout),
+        poll_interval=poll_interval,
+        settle=0.2,
+    )
+    if not seed_result.get("ok"):
+        return seed_result
+
+    deadline = started + timeout
+    while time.monotonic() < deadline:
+        session_id = _accepted_session()
+        if session_id:
+            return {
+                "ok": True, "pane": pane_id, "ready": True,
+                "sent": True, "submitted": True,
+                "reason": "accepted-turn", "session_id": session_id,
+            }
+        time.sleep(poll_interval)
+
+    return {
+        "ok": False, "pane": pane_id,
+        "ready": bool(seed_result.get("ready")),
+        "sent": bool(seed_result.get("sent")),
+        "submitted": False,
+        "reason": "acceptance-timeout",
     }
 
 
