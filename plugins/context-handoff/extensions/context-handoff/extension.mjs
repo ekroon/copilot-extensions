@@ -503,6 +503,19 @@ function formatHandoffMarkdown(handoffData, scope) {
 
 // --- Extension ---
 
+const joinStartedAt = Date.now();
+process.stderr.write(
+  `[context-handoff-ext] joining session pid=${process.pid} ` +
+    `session=${process.env.COPILOT_SESSION_ID || process.env.SESSION_ID || "unknown"}\n`,
+);
+const joinPendingTimer = setTimeout(() => {
+  process.stderr.write(
+    `[context-handoff-ext] joinSession still pending after ` +
+      `${Date.now() - joinStartedAt}ms\n`,
+  );
+}, 5000);
+joinPendingTimer.unref();
+
 const session = await joinSession({
   onPermissionRequest: approveAll,
 
@@ -895,6 +908,11 @@ const session = await joinSession({
     },
   ],
 });
+clearTimeout(joinPendingTimer);
+process.stderr.write(
+  `[context-handoff-ext] joined session in ${Date.now() - joinStartedAt}ms ` +
+    `session=${session.sessionId || "unknown"}\n`,
+);
 
 // --- Session lifecycle reconstructed from events (SDK callback hooks removed) ---
 // The native runtime dropped SDK callback hooks ("SDK hook callbacks are no
