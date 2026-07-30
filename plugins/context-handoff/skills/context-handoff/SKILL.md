@@ -83,8 +83,9 @@ back to the paste reply.
 - **agent-dispatch present →** a **`proposed`, `handoff`-labeled task** pinned to
   this worktree (payload = the full markdown; **no** session file). It returns a
   baton paste-seed *and* a **deferred cutover seed** on the `HANDOFF_SEED:` line.
-- **agent-dispatch absent →** a **file** in the session state folder; the reply
-  is `Continue: <topic>. Read the handoff at <path> and continue.`
+- **agent-dispatch absent →** a **file** plus worktree/state sidecar in the
+  session state folder; the reply tells the successor to call
+  `consume_handoff_file` with that exact path.
 
 You don't choose the storage — the tool does; it sits *on top of* agent-dispatch
 when it exists and falls back to the file otherwise. **Prefer the task flow:** if
@@ -176,9 +177,13 @@ The mechanics, for when you must do it by hand (extension not loaded):
   - **`--dedup-key handoff-<sessionId>`** makes re-running `/handoff` in the same
     session idempotent.
 
-- **No coordinator:** write the file to
-  `~/.copilot/session-state/<sessionId>/files/<sessionId>-prompt.md` and reply
-  with `Continue: <topic>. Read the handoff at <path> and continue.`
+- **No coordinator:** when `save_handoff_prompt` is available, use it so it
+  writes both `~/.copilot/session-state/<sessionId>/files/<sessionId>-prompt.md`
+  and its worktree/state sidecar. The returned seed tells the successor to call
+  `consume_handoff_file` with the exact prompt path. If the extension is wholly
+  unavailable and you must write a file manually, that legacy file is
+  explicit-path recovery only; `/resume-handoff` will not guess or auto-select
+  it without the metadata sidecar.
 
 ---
 
@@ -250,9 +255,10 @@ explicitly asks):
    - pasting that resume seed, which loads the full brief AND marks the task
      completed with one command (`agent-dispatch consume <id>`) and tells you to
      continue in place.
-2. **File form** (the fallback when no coordinator was running). The reply was
-   `Continue: <topic>. Read the handoff at <path> and continue.`; pasted into a
-   new session, it names the file and tells you to read it and continue.
+2. **File form** (the fallback when no coordinator was running). The reply
+   names the exact prompt path and tells the new session to call
+   `consume_handoff_file`, which validates the worktree, loads the brief, and
+   marks it consumed.
 
 > **A handoff is in-place: same worktree, new session.** The point of a handoff
 > is to continue *this* work with a fresh context window, so the new session
@@ -280,8 +286,10 @@ What the extension does under the hood, in order:
    handoff is a baton, delivered once picked up), reads its payload, and injects
    that payload framed as "you are resuming a handoff; continue in place."
 2. **Session file (fallback).** If no coordinator (or no matching task), it finds
-   the newest session-folder `*-prompt.md` whose recorded CWD matches this
-   worktree and injects its contents the same way.
+   the newest `pending` session-folder handoff whose JSON sidecar names this
+   exact worktree. It claims the file, injects its contents, then marks it
+   consumed only after injection succeeds. Failed injection returns it to
+   `pending`; stale interrupted claims become retryable.
 3. **Nothing found.** It tells the operator (a log line); paste a handoff prompt
    directly instead.
 
@@ -294,7 +302,7 @@ handoff task.
 > slash command). If the extension isn't loaded, `/resume-handoff` won't exist —
 > resume by pasting the previous session's reply prompt instead (the resume seed
 > `You are resuming a handoff (agent-dispatch task <id>) … run: agent-dispatch
-> consume <id>` or `Read the handoff at <path> …`). When you *do* get a pasted
+> consume <id>` or `consume_handoff_file` with an exact path). When you *do* get a pasted
 > agent-dispatch resume seed, act on it directly: `agent-dispatch consume <id>`
 > loads the brief **and** marks the handoff completed in one shot (idempotent —
 > safe to run even if a live cutover already completed it). If you only want to
@@ -338,8 +346,9 @@ fallback mode). Full template:
   addressed to the **next agent** and is whichever form `save_handoff_prompt`
   returned: the agent-dispatch resume seed `You are resuming a handoff
   (agent-dispatch task <id>) … run: agent-dispatch consume <id> ; then
-  continue: <topic>.` (task) or `Read the handoff at <path> and continue:
-  <topic>.` (file). It is copy-pasted verbatim into `/clear` (or `/new`); keep
+  continue: <topic>.` (task)   or `Load and consume the exact file-backed handoff with the
+  consume_handoff_file tool using path: <path>.` (file). It is copy-pasted
+  verbatim into `/clear` (or `/new`); keep
   it scannable and do **not** repeat the handoff contents.
 - **Lead with the original topic.** The "Original Request" must reference the
   session's founding purpose, not just recent activity.
