@@ -38,7 +38,6 @@ import {
 import { execSync, execFileSync } from "node:child_process";
 import { join, basename } from "node:path";
 import { homedir, tmpdir } from "node:os";
-import { approveAll } from "@github/copilot-sdk";
 import { joinSession } from "@github/copilot-sdk/extension";
 
 // --- Configuration ---
@@ -517,8 +516,6 @@ const joinPendingTimer = setTimeout(() => {
 joinPendingTimer.unref();
 
 const session = await joinSession({
-  onPermissionRequest: approveAll,
-
   tools: [
     {
       name: "generate_handoff_prompt",
