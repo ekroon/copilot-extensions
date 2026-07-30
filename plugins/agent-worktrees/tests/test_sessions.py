@@ -995,6 +995,18 @@ def test_seed_pane_footer_cue_also_ready():
     assert result["submitted"] is True
 
 
+def test_seed_pane_framed_input_cue_also_ready():
+    seed = "Continue: do the thing"
+    frame = "╻▄▄▄▄\n┃\n╹▀▀▀▀\n◎ Loading: still waiting on extensions"
+    driver = _SeedDriver(
+        ready_caps=[frame, frame],
+        echo_caps=[seed],
+    )
+    result = _run_seed(driver, seed=seed)
+    assert result["ready"] is True
+    assert result["submitted"] is True
+
+
 def test_seed_pane_not_echoed_skips_enter():
     # Ready + typed, but the seed never echoes back -> do NOT press Enter, so a
     # partially-eaten seed is never submitted as a bogus turn.

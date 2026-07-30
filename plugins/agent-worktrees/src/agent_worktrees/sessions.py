@@ -1519,17 +1519,25 @@ def mux_seed_pane(
 
     def _is_copilot_ready(cap: str) -> bool:
         low = cap.lower()
-        # Copilot-specific cues only: the input caret, or the interrupt footer.
-        # A bare rule line (``─────``) is NOT trusted -- banners/spinners draw it.
-        return ("❯" in cap) or ("esc" in low and "interrupt" in low)
+        # Copilot-specific cues only: the classic caret, the current framed
+        # input box, or the interrupt footer. A bare rule line is NOT trusted --
+        # banners/spinners draw it too.
+        framed_input = "╻" in cap and "╹" in cap and "┃" in cap
+        return (
+            ("❯" in cap)
+            or framed_input
+            or ("esc" in low and "interrupt" in low)
+        )
 
     # Readiness must be STABLE (two consecutive sightings) so a single transient
     # frame (a startup banner, a spinner) is not mistaken for the input prompt.
     ready = False
     stable = 0
+    last_capture = ""
     deadline = time.monotonic() + ready_timeout
     while time.monotonic() < deadline:
-        if _is_copilot_ready(_cap()):
+        last_capture = _cap()
+        if _is_copilot_ready(last_capture):
             stable += 1
             if stable >= 2:
                 ready = True
@@ -1545,6 +1553,7 @@ def mux_seed_pane(
         return {
             "ok": False, "pane": pane_id, "ready": False,
             "sent": False, "submitted": False, "reason": "not-ready-timeout",
+            "capture_tail": last_capture[-1000:],
         }
 
     def _send(*a: str) -> bool:

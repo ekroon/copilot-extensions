@@ -1078,6 +1078,7 @@ def cmd_handoff_cutover(args: argparse.Namespace) -> int:
             "seeded": False,
             "seed_ready": bool(seed_result.get("ready")),
             "reason": seed_result.get("reason") or "seed-delivery-failed",
+            "capture_tail": seed_result.get("capture_tail"),
             "successor_cleanup": cleanup,
         })
         return 5
