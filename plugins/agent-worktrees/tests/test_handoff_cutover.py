@@ -227,10 +227,9 @@ class TestCmdHandoffCutover:
         assert out["session"] == "wt-wtY"
         assert out["cmd"] == [
             "bash", "setup.sh", "--allow-all-tools",
-            "-i", "continue the work",
         ]
         assert out["seed_len"] == len("continue the work")
-        assert out["seed_delivery"] == "launch-arg"
+        assert out["seed_delivery"] == "send-keys-confirmed"
 
     def test_spawn_success_opens_window(self, monkeypatch, capfd, tmp_path):
         monkeypatch.setattr(m, "_infer_worktree_id_from_cwd", lambda: "wtZ")
@@ -257,13 +256,9 @@ class TestCmdHandoffCutover:
             return {"ok": True, "new_pane": "%5", "error": None}
 
         monkeypatch.setattr(sessions, "mux_new_window", _fake_new_window)
-        monkeypatch.setattr(
-            sessions, "mux_seed_pane",
-            lambda *a, **k: pytest.fail("tmux seed must be a launch argument"),
-        )
         confirmed = {}
         monkeypatch.setattr(
-            sessions, "mux_confirm_prefilled_seed",
+            sessions, "mux_seed_pane_and_confirm",
             lambda pane, seed, work_dir, prior_sessions, **k: confirmed.update(
                 pane=pane,
                 seed=seed,
@@ -292,9 +287,7 @@ class TestCmdHandoffCutover:
         assert out["new_pane"] == "%5"
         assert out["seed_len"] == len("resume the multi word work")
         assert out["seeded"] is True
-        assert captured["cmd"] == [
-            "copilot", "-i", "resume the multi word work",
-        ]
+        assert captured["cmd"] == ["copilot"]
         assert confirmed == {
             "pane": "%5",
             "seed": "resume the multi word work",
@@ -330,7 +323,7 @@ class TestCmdHandoffCutover:
             lambda *a, **k: {"ok": True, "new_pane": "%5", "error": None},
         )
         monkeypatch.setattr(
-            sessions, "mux_confirm_prefilled_seed",
+            sessions, "mux_seed_pane_and_confirm",
             lambda *a, **k: {
                 "ok": False,
                 "pane": "%5",
